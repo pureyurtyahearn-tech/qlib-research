@@ -1,0 +1,10 @@
+.env
+git_ignore_folder/
+__pycache__/
+*.pyc
+*.pyo
+log/
+rdagent_run*.log
+selector.log
+pickle_cache/
+nasdaq-data/

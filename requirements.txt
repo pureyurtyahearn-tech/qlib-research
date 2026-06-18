@@ -1,0 +1,22 @@
+# Core framework
+rdagent==0.8.0
+pyqlib==0.9.7
+
+# LLM backend (Anthropic via LiteLLM)
+litellm>=1.89.1
+anthropic
+
+# Local embeddings — replaces OpenAI embedding calls (Patch 1)
+sentence-transformers>=5.5.1
+
+# Data
+yfinance>=1.4.1
+pandas>=2.0.0
+numpy>=1.26.0
+tables          # PyTables: required for pandas HDF5 (.h5) read/write
+
+# Experiment tracking
+mlflow>=3.13.0
+
+# Utilities
+python-dotenv>=1.0.0
