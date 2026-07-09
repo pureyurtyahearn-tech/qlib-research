@@ -1,0 +1,85 @@
+# Exact pinned versions from the working Codespace environment.
+# Python 3.12.1 required (see local_setup.md for full setup instructions).
+#
+# On a local machine WITHOUT a GPU, install torch from the CPU wheel index to
+# save ~3 GB vs the CUDA build:
+#
+#   pip install torch==2.12.0+cpu --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements_exact.txt
+#
+# On a GPU machine, or in GitHub Codespaces, plain pip install is fine:
+#
+#   pip install -r requirements_exact.txt
+
+# ── Core ───────────────────────────────────────────────────────────────────────
+rdagent==0.8.0
+pyqlib==0.9.7
+
+# ── LLM routing + Claude ───────────────────────────────────────────────────────
+litellm==1.89.1
+openai==2.41.1           # required by litellm settings validation; not actually called
+tiktoken==0.13.0
+
+# ── Local embeddings (Patch 1 — replaces OpenAI embedding API) ────────────────
+sentence-transformers==5.5.1
+torch==2.12.0            # CPU is sufficient; see header comment for CPU wheel
+transformers==5.12.1
+huggingface_hub==1.19.0
+tokenizers==0.22.2
+safetensors==0.8.0
+
+# ── Data download + manipulation ───────────────────────────────────────────────
+yfinance==1.4.1
+curl_cffi==0.15.0        # yfinance HTTP backend
+multitasking==0.0.13     # yfinance dependency
+pandas==2.3.3
+numpy==2.4.6
+tables==3.11.1           # HDF5/PyTables — required for daily_pv.h5
+pyarrow==24.0.0          # parquet support used by RD-Agent workspaces
+numexpr==2.14.1          # optional qlib acceleration
+
+# ── ML models (qlib backtest) ─────────────────────────────────────────────────
+lightgbm==4.6.0
+scikit-learn==1.9.0
+scipy==1.17.1
+statsmodels==0.14.6
+cvxpy==1.9.1             # portfolio optimisation (used by some qlib analysers)
+osqp==1.1.3              # cvxpy solver
+
+# ── Experiment tracking ────────────────────────────────────────────────────────
+mlflow==3.13.0
+mlflow-skinny==3.13.0
+
+# ── Config + serialisation ─────────────────────────────────────────────────────
+python-dotenv==1.2.2
+pydantic==2.13.4
+pydantic-settings==2.14.1
+pydantic-extra-types==2.11.1
+PyYAML==6.0.3
+
+# ── Parallelism (patched — see local_setup.md) ────────────────────────────────
+pandarallel==1.6.5
+
+# ── Async + HTTP ───────────────────────────────────────────────────────────────
+aiohttp==3.14.1
+aiofile==3.11.1
+anyio==4.12.1
+httpx==0.28.1
+requests==2.32.5
+
+# ── Utilities ──────────────────────────────────────────────────────────────────
+fire==0.7.1
+loguru==0.7.3
+rich==15.0.0
+tqdm==4.68.2
+tenacity==9.1.4
+filelock==3.29.4
+click==8.4.1
+packaging==26.0
+python-dateutil==2.9.0.post0
+pytz==2025.2
+tzdata==2025.3
+
+# ── Optional: NYSE/Kaggle data build ──────────────────────────────────────────
+kagglehub==1.0.2
+kaggle==2.2.2

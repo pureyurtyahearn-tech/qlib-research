@@ -6,5 +6,6 @@ __pycache__/
 log/
 rdagent_run*.log
 selector.log
+build_nyse*.log
 pickle_cache/
 nasdaq-data/
