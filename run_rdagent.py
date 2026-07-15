@@ -183,25 +183,29 @@ def _local_workspace_execute(self, qlib_config_name="conf.yaml", run_env={}, *ar
     # (a) Patch YAML configs: China → US / SP500
     # NOTE: dict key ordering is intentional — backtest block before end_time.
     _cn_to_us = {
-        'provider_uri: "~/.qlib/qlib_data/cn_data"': 'provider_uri: "~/.qlib/qlib_data/us_data"',
+        'provider_uri: "~/.qlib/qlib_data/cn_data"': 'provider_uri: "~/.qlib/qlib_data/us_data_pit_full"',
         "region: cn":                    "region: us",
-        "market: &market csi300":        "market: &market sp500",
-        "benchmark: &benchmark SH000300": "benchmark: &benchmark SPY",
+        "market: &market csi300":        "market: &market sp500pit",
+        "benchmark: &benchmark SH000300": "benchmark: &benchmark SP500EW",
         "start_time: 2008-01-01":        "start_time: 2010-01-01",  # 16 GB RAM tier (was 2015 for 8 GB)
         # Multi-line backtest block MUST be replaced before the single-line
         # "end_time: 2020-08-01" entry below — otherwise that replacement
         # destroys this pattern before it can match.
+        # HOLDOUT DISCIPLINE (2026-07-15): RD-Agent generation/selection must NOT see the
+        # 2024-01-01 -> 2026-06 holdout. All windows below end at 2023-12-31 so its backtest
+        # IC feedback is computed only on <=2023 data. The holdout is confirmed separately,
+        # once, on the single pre-registered factor (see ext16/ext17).
         "backtest:\n        start_time: 2017-01-01\n        end_time: 2020-08-01":
-            "backtest:\n        start_time: 2023-01-01\n        end_time: 2026-06-16",
-        "end_time: 2020-08-01":          "end_time: 2026-06-16",
-        "end_time: 2022-08-01":          "end_time: 2026-06-16",
+            "backtest:\n        start_time: 2022-01-01\n        end_time: 2023-12-31",
+        "end_time: 2020-08-01":          "end_time: 2023-12-31",
+        "end_time: 2022-08-01":          "end_time: 2023-12-31",
         # fit window: 2015 for 16 GB RAM tier (was 2018 for 8 GB, per local_setup.md RAM table)
         "fit_start_time: 2008-01-01":    "fit_start_time: 2015-01-01",
-        "fit_end_time: 2014-12-31":      "fit_end_time: 2022-12-31",
+        "fit_end_time: 2014-12-31":      "fit_end_time: 2021-12-31",
         "limit_threshold: 0.095":        "limit_threshold: null",  # CN circuit-breaker, not applicable to US
-        "train: [2008-01-01, 2014-12-31]": "train: [2018-01-01, 2020-12-31]",
-        "valid: [2015-01-01, 2016-12-31]": "valid: [2021-01-01, 2022-12-31]",
-        "test: [2017-01-01, 2020-08-01]":  "test: [2023-01-01, 2026-06-16]",
+        "train: [2008-01-01, 2014-12-31]": "train: [2015-01-01, 2019-12-31]",
+        "valid: [2015-01-01, 2016-12-31]": "valid: [2020-01-01, 2021-12-31]",
+        "test: [2017-01-01, 2020-08-01]":  "test: [2022-01-01, 2023-12-31]",
     }
     for yaml_name in ["conf_baseline.yaml", "conf_combined_factors.yaml",
                        "conf_combined_factors_sota_model.yaml"]:
