@@ -1,4 +1,7 @@
 .env
+.venv/
+*.log
+clean4.txt
 git_ignore_folder/
 __pycache__/
 *.pyc

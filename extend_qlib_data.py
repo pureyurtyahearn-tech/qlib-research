@@ -12,7 +12,7 @@ import warnings; warnings.filterwarnings("ignore")
 import numpy as np, pandas as pd, yfinance as yf, os
 from pathlib import Path
 
-QLIB_DIR = Path("/home/codespace/.qlib/qlib_data/us_data")
+QLIB_DIR = Path.home() / ".qlib" / "qlib_data" / "us_data"
 BOUNDARY  = "2020-11-10"
 END_DATE  = "2026-06-30"
 FEATURES  = ["open", "close", "high", "low", "volume", "factor", "change"]
@@ -37,8 +37,8 @@ with open(cal_file, "a") as f:
         f.write(d + "\n")
 print(f"Calendar updated to {len(old_cal)+len(new_dates)} days")
 
-# ── 3. Active nasdaq100 instruments ───────────────────────────────────────────
-with open(QLIB_DIR / "instruments" / "nasdaq100.txt") as f:
+# ── 3. Active S&P 500 instruments (market used by run_rdagent.py backtest) ────
+with open(QLIB_DIR / "instruments" / "sp500.txt") as f:
     active = [ln.split("\t")[0].strip() for ln in f if "2099-12-31" in ln]
 print(f"Active instruments: {len(active)}")
 

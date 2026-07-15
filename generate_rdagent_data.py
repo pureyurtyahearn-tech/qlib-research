@@ -1,7 +1,8 @@
 """
 Generate daily_pv.h5 for RD-Agent factor code covering 2010-2026.
 Uses yfinance (auto-adjusted, fully consistent) for the full period.
-Active nasdaq100 instruments only (~103 tickers as of 2020).
+Active S&P 500 instruments (~505 tickers with the 2099-12-31 sentinel in sp500.txt).
+This produces the SP500-only base that fix_and_build_nyse.py merges NYSE into.
 """
 import warnings; warnings.filterwarnings("ignore")
 import numpy as np, pandas as pd, yfinance as yf, os
@@ -12,11 +13,11 @@ FULL_END   = "2026-06-30"
 DATA_DIR   = "git_ignore_folder/factor_implementation_source_data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Active nasdaq100 tickers from qlib instrument list
-nasdaq_file = Path("/home/codespace/.qlib/qlib_data/us_data/instruments/nasdaq100.txt")
-with open(nasdaq_file) as f:
+# Active S&P 500 tickers from qlib instrument list
+sp500_file = Path.home() / ".qlib" / "qlib_data" / "us_data" / "instruments" / "sp500.txt"
+with open(sp500_file) as f:
     active_tickers = [ln.split("\t")[0].strip() for ln in f if "2099-12-31" in ln]
-print(f"Active nasdaq100 tickers: {len(active_tickers)}")
+print(f"Active S&P 500 tickers: {len(active_tickers)}")
 
 # Some tickers were renamed; yfinance handles most automatically,
 # but FB→META needs explicit mapping since 'FB' no longer trades

@@ -18,7 +18,19 @@ import numpy as np, pandas as pd, yfinance as yf
 from pathlib import Path
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-KAGGLE_CSV  = "/home/codespace/.cache/kagglehub/datasets/mousemover/quant-finance-nyse-5-years/versions/1/NYSE_fully_cleaned_2019_2024.csv"
+import kagglehub, glob as _glob
+from kagglehub.config import set_kaggle_api_token
+from dotenv import load_dotenv
+load_dotenv()
+_kaggle_token = os.environ.get("KAGGLE_API_TOKEN")
+if _kaggle_token:
+    set_kaggle_api_token(_kaggle_token)  # single-token Bearer auth (kagglehub 1.x)
+_kaggle_path = kagglehub.dataset_download("mousemover/quant-finance-nyse-5-years")
+_csvs = _glob.glob(os.path.join(_kaggle_path, "**", "*.csv"), recursive=True)
+if not _csvs:
+    raise FileNotFoundError(f"No CSV found in kagglehub dataset at {_kaggle_path}")
+KAGGLE_CSV  = _csvs[0]
+print(f"Kaggle CSV: {KAGGLE_CSV}", flush=True)
 SP500_H5    = "git_ignore_folder/factor_implementation_source_data/daily_pv.h5"
 OUT_H5      = "git_ignore_folder/factor_implementation_source_data/daily_pv.h5"
 NYSE_ONLY_H5 = "git_ignore_folder/nyse_adjusted_daily_pv.h5"   # intermediate; kept for inspection
@@ -54,6 +66,7 @@ start_idx = 0
 split_count = 0
 div_count = 0
 skip_count = 0
+presplit_count = 0   # splits the Kaggle source had already removed (correctly skipped)
 
 if Path(CHECKPOINT).exists():
     with open(CHECKPOINT, "rb") as f:
@@ -63,6 +76,7 @@ if Path(CHECKPOINT).exists():
     split_count = ckpt.get("splits", 0)
     div_count   = ckpt.get("divs", 0)
     skip_count  = ckpt.get("skips", 0)
+    presplit_count = ckpt.get("presplits", 0)
     print(f"Resuming from checkpoint: {start_idx}/{len(all_tickers)} done "
           f"({len(adjusted_frames)} frames, {split_count} splits, {div_count} divs applied)", flush=True)
 else:
@@ -82,17 +96,29 @@ def apply_adjustments(
       Dividends second: yfinance dividend amounts are already in split-adjusted share terms,
         so we compute adj_factor against the split-adjusted prev_close.
 
-    Returns (adjusted_df, n_splits_applied, n_divs_applied).
+    Returns (adjusted_df, n_splits_applied, n_divs_applied, n_splits_already_adjusted).
     """
     df = df.copy()
     price_cols = ["open", "high", "low", "close"]
     n_splits = 0
     n_divs   = 0
+    n_presplit = 0   # splits skipped because the source already removed them
 
     df_start = df.index.min()
     df_end   = df.index.max()
 
     # — Splits: oldest to newest —
+    #
+    # The Kaggle source is INCONSISTENTLY adjusted: some tickers arrive already
+    # split-adjusted (price series is continuous across the split date, e.g. NEE, ANET)
+    # while others are genuinely raw (the split shows as a price cliff, e.g. SHOP).
+    # Blindly back-adjusting an already-adjusted series divides the pre-split window a
+    # SECOND time, manufacturing a spurious ratio-sized discontinuity at the split date.
+    #
+    # So: detect whether the split is actually present before adjusting. Compare the
+    # observed close ratio across the split boundary to the expected split ratio:
+    #   present (raw)     -> observed ≈ ratio   -> adjust
+    #   already adjusted  -> observed ≈ 1.0     -> skip
     for raw_date, ratio in splits.sort_index().items():
         split_date = pd.Timestamp(raw_date).tz_localize(None).normalize()
         # Only care about splits within our data window
@@ -101,8 +127,22 @@ def apply_adjustments(
         if ratio <= 0 or ratio == 1.0:
             continue
         mask = df.index < split_date
-        if not mask.any():
+        post = ~mask
+        if not mask.any() or not post.any():
             continue
+
+        pre_close  = float(df.loc[mask, "close"].iloc[-1])
+        post_close = float(df.loc[post, "close"].iloc[0])
+        if pre_close <= 0 or post_close <= 0:
+            continue
+        observed = pre_close / post_close
+
+        # Tolerance 25%: a genuine split shows observed≈ratio (within a normal daily move);
+        # an already-adjusted series shows observed≈1, which is far from any real ratio.
+        if abs(observed / ratio - 1.0) > 0.25:
+            n_presplit += 1
+            continue   # source already removed this split — do NOT re-adjust
+
         df.loc[mask, price_cols] = df.loc[mask, price_cols] / ratio
         df.loc[mask, "volume"]   = df.loc[mask, "volume"]   * ratio
         n_splits += 1
@@ -129,7 +169,7 @@ def apply_adjustments(
         df.loc[mask, price_cols] = df.loc[mask, price_cols] * adj_factor
         n_divs += 1
 
-    return df, n_splits, n_divs
+    return df, n_splits, n_divs, n_presplit
 
 # ── Step 3: Fetch adjustments and apply ───────────────────────────────────────
 print(f"\nProcessing {len(all_tickers)} tickers (starts at #{start_idx})...", flush=True)
@@ -146,9 +186,10 @@ for i, kaggle_t in enumerate(all_tickers[start_idx:], start=start_idx):
         if splits is None:    splits    = pd.Series(dtype=float)
         if dividends is None: dividends = pd.Series(dtype=float)
 
-        adj_df, ns, nd = apply_adjustments(df, splits, dividends)
+        adj_df, ns, nd, npre = apply_adjustments(df, splits, dividends)
         split_count += ns
         div_count   += nd
+        presplit_count += npre
 
         # Rename columns to qlib convention
         adj_df = adj_df.rename(columns={
@@ -182,17 +223,20 @@ for i, kaggle_t in enumerate(all_tickers[start_idx:], start=start_idx):
     if (i + 1) % 50 == 0:
         pct = (i + 1) / len(all_tickers) * 100
         print(f"  [{i+1:4d}/{len(all_tickers)}] {pct:5.1f}%  "
-              f"splits={split_count}  divs={div_count}  skips={skip_count}", flush=True)
+              f"splits={split_count}  pre-adj={presplit_count}  "
+              f"divs={div_count}  skips={skip_count}", flush=True)
 
     if (i + 1) % CKPT_EVERY == 0:
         with open(CHECKPOINT, "wb") as f:
             pickle.dump({"frames": adjusted_frames, "next_idx": i + 1,
-                         "splits": split_count, "divs": div_count, "skips": skip_count}, f)
+                         "splits": split_count, "divs": div_count,
+                         "skips": skip_count, "presplits": presplit_count}, f)
 
     time.sleep(SLEEP)
 
 print(f"\nDone: {len(adjusted_frames)} ticker frames, "
-      f"{split_count} splits applied, {div_count} divs applied, {skip_count} errors", flush=True)
+      f"{split_count} splits applied, {presplit_count} splits already-adjusted (skipped), "
+      f"{div_count} divs applied, {skip_count} errors", flush=True)
 
 # ── Step 4: Combine and cast ───────────────────────────────────────────────────
 print("Combining frames...", flush=True)

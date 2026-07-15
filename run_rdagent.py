@@ -12,11 +12,30 @@ See README.md for full setup instructions and patch explanations.
 """
 import sys
 import os
+
+# ── Windows: force Python UTF-8 Mode ──────────────────────────────────────────
+# RD-Agent writes LLM-generated factor code via Path.write_text() and reads
+# subprocess output in text mode. On Windows these default to cp1252, which
+# raises UnicodeEncode/DecodeError on the non-Latin1 characters models routinely
+# emit (e.g. '̄' combining macron for x̄). UTF-8 Mode makes all file and
+# pipe I/O default to UTF-8. It must be enabled at interpreter start, so if we
+# are not already in UTF-8 Mode, re-exec with -X utf8. PYTHONUTF8=1 is exported
+# so multiprocessing-spawned workers also start in UTF-8 Mode (and therefore
+# skip this block instead of re-exec'ing themselves).
+if sys.platform == "win32" and not sys.flags.utf8_mode:
+    os.environ["PYTHONUTF8"] = "1"
+    os.environ["PYTHONIOENCODING"] = "utf-8"
+    os.execv(sys.executable, [sys.executable, "-X", "utf8",
+                              os.path.abspath(__file__), *sys.argv[1:]])
+
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env BEFORE any rdagent imports so pydantic-settings sees the values
-load_dotenv(".env")
+# Load .env BEFORE any rdagent imports so pydantic-settings sees the values.
+# override=True is required because a stale OS-level ANTHROPIC_API_KEY (User env var)
+# would otherwise shadow the .env value — python-dotenv does not override existing
+# environment variables by default, so .env must be made authoritative here.
+load_dotenv(".env", override=True)
 
 
 # ── Patch 0: Relax JSON type validation for Claude responses ──────────────────
@@ -168,7 +187,7 @@ def _local_workspace_execute(self, qlib_config_name="conf.yaml", run_env={}, *ar
         "region: cn":                    "region: us",
         "market: &market csi300":        "market: &market sp500",
         "benchmark: &benchmark SH000300": "benchmark: &benchmark SPY",
-        "start_time: 2008-01-01":        "start_time: 2015-01-01",
+        "start_time: 2008-01-01":        "start_time: 2010-01-01",  # 16 GB RAM tier (was 2015 for 8 GB)
         # Multi-line backtest block MUST be replaced before the single-line
         # "end_time: 2020-08-01" entry below — otherwise that replacement
         # destroys this pattern before it can match.
@@ -176,8 +195,8 @@ def _local_workspace_execute(self, qlib_config_name="conf.yaml", run_env={}, *ar
             "backtest:\n        start_time: 2023-01-01\n        end_time: 2026-06-16",
         "end_time: 2020-08-01":          "end_time: 2026-06-16",
         "end_time: 2022-08-01":          "end_time: 2026-06-16",
-        # fit window: 2018 not 2015 — combined-factors model OOMs with 500 stocks × 7yr
-        "fit_start_time: 2008-01-01":    "fit_start_time: 2018-01-01",
+        # fit window: 2015 for 16 GB RAM tier (was 2018 for 8 GB, per local_setup.md RAM table)
+        "fit_start_time: 2008-01-01":    "fit_start_time: 2015-01-01",
         "fit_end_time: 2014-12-31":      "fit_end_time: 2022-12-31",
         "limit_threshold: 0.095":        "limit_threshold: null",  # CN circuit-breaker, not applicable to US
         "train: [2008-01-01, 2014-12-31]": "train: [2018-01-01, 2020-12-31]",
@@ -293,19 +312,144 @@ else:
 _ws_mod.QlibFBWorkspace.execute = _local_workspace_execute
 
 
+# ── Patch 4 (Windows): run LocalEnv's code sandbox natively on Windows ─────────
+#
+# RD-Agent's LocalEnv.run / _run assume a POSIX host and fail on native Windows:
+#   (a) volume mounts use os.symlink        -> WinError 1314 without privilege
+#   (b) every entry is wrapped in
+#         /bin/sh -c 'timeout --kill-after=10 N {entry}; ...'
+#       but Popen(shell=True) on Windows uses cmd.exe, which has no /bin/sh or
+#       GNU `timeout`.
+#   (c) PATH is rebuilt by splitting/joining on ':' (env.py line ~524). On Windows
+#       that splits "C:\..." at the drive colon AND overrides the real Windows PATH,
+#       so `python` / `qrun` can no longer be found.
+#   (d) live output uses select.poll(), which does not exist on Windows.
+#
+# Fixes below (win32 only): override run() to drop the POSIX sh/timeout wrapper,
+# and override _run() to build PATH with os.pathsep and capture output via
+# communicate() (no poll). Symlinks themselves are handled by enabling Windows
+# Developer Mode (grants SeCreateSymbolicLinkPrivilege to non-admin users).
+# The volume-map construction below is copied verbatim from LocalEnv._run so the
+# mount semantics stay identical.
+#
+if sys.platform == "win32":
+    import subprocess as _subprocess
+    import rdagent.utils.env as _env_mod
+    from rdagent.utils.env import LocalEnv as _LocalEnv
+
+    def _win_local_run(self, entry=None, local_path=None, env=None,
+                       running_extra_volume=_env_mod.MappingProxyType({}), **kwargs):
+        # --- build volume map (verbatim from upstream LocalEnv._run) ---
+        volumes = {}
+        if self.conf.extra_volumes is not None:
+            for lp, rp in self.conf.extra_volumes.items():
+                volumes[lp] = rp["bind"] if isinstance(rp, dict) else rp
+            cache_path = "/tmp/sample" if "/sample/" in "".join(self.conf.extra_volumes.keys()) else "/tmp/full"
+            Path(cache_path).mkdir(parents=True, exist_ok=True)
+            volumes[cache_path] = _env_mod.T("scenarios.data_science.share:scen.cache_path").r()
+        for lp, rp in running_extra_volume.items():
+            volumes[lp] = rp
+        assert local_path is not None, "local_path should not be None"
+        volumes = _env_mod.normalize_volumes(volumes, local_path)
+
+        created = []
+        try:
+            # symlink the volumes (works once Developer Mode is enabled)
+            for real, link in volumes.items():
+                link_path = Path(link)
+                real_path = Path(real)
+                if not link_path.parent.exists():
+                    link_path.parent.mkdir(parents=True, exist_ok=True)
+                if link_path.exists() or link_path.is_symlink():
+                    link_path.unlink()
+                link_path.symlink_to(real_path)
+                created.append(link_path)
+
+            # Windows PATH: prepend the venv bin dir to the REAL PATH (os.pathsep),
+            # never split on ':'.
+            run_env = {**os.environ}
+            if env:
+                run_env.update({k: str(v) for k, v in env.items()})
+            if self.conf.bin_path:
+                run_env["PATH"] = self.conf.bin_path + os.pathsep + os.environ.get("PATH", "")
+
+            if entry is None:
+                entry = self.conf.default_entry
+            cwd = Path(local_path).resolve() if local_path else None
+
+            proc = _subprocess.Popen(
+                entry, cwd=cwd, env=run_env,
+                stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
+                text=True, shell=True,
+                encoding="utf-8", errors="replace",
+            )
+            timeout = self.conf.running_timeout_period
+            try:
+                out, err = proc.communicate(timeout=timeout)
+            except _subprocess.TimeoutExpired:
+                proc.kill()
+                out, err = proc.communicate()
+                combined = (out or "") + (err or "")
+                combined += f"\n\nThe running time exceeds {timeout} seconds, so the process is killed."
+                print(combined)
+                return combined, 1
+            combined = (out or "") + (err or "")
+            print(combined)
+            return combined, proc.returncode
+        finally:
+            for p in created:
+                try:
+                    if p.is_symlink():
+                        p.unlink()
+                    elif p.exists():
+                        try:
+                            p.unlink()
+                        except (IsADirectoryError, PermissionError, OSError):
+                            os.rmdir(p)
+                except FileNotFoundError:
+                    pass
+
+    def _win_run(self, entry=None, local_path=".", env=None, **kwargs):
+        running_extra_volume = kwargs.get("running_extra_volume", {})
+        if entry is None:
+            entry = self.conf.default_entry
+        # Skip the POSIX '/bin/sh -c "timeout ... {entry}"' wrapper; run bare entry.
+        if self.conf.enable_cache:
+            return self.cached_run(entry, local_path, env, running_extra_volume)
+        _retry = next(n for n in dir(self) if n.endswith("__run_with_retry"))
+        return getattr(self, _retry)(entry, local_path, env, running_extra_volume)
+
+    _LocalEnv._run = _win_local_run
+    _LocalEnv.run = _win_run
+
+
 # ── Now safe to import the scenario and loop ───────────────────────────────────
 import asyncio
 from rdagent.app.qlib_rd_loop.factor import FactorRDLoop
 from rdagent.app.qlib_rd_loop.conf import FACTOR_PROP_SETTING
 
-print("=" * 60)
-print("RD-Agent fin_factor — autonomous alpha factor discovery")
-print(f"Model : {os.environ.get('CHAT_MODEL', 'not set')}")
-print(f"Config: {FACTOR_PROP_SETTING}")
-print("=" * 60)
+# Entry-point guard: on Windows, multiprocessing uses 'spawn', which re-imports this
+# module in every worker. Without this guard the loop would relaunch recursively (fork
+# bomb). On Linux ('fork') it is a harmless no-op. The module-level monkey-patches above
+# are intentionally left unguarded so spawned workers inherit the patched environment.
+if __name__ == "__main__":
+    # Force UTF-8 stdout/stderr: banner and loguru logs contain non-cp1252 chars (—, ×, →)
+    # that crash on the default Windows console codepage.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
 
-# To resume a previous session, replace FactorRDLoop(FACTOR_PROP_SETTING) with:
-#   loop = FactorRDLoop.load("log/<session-dir>", checkout=True)
-# loop_n counts *total* loops completed in the session, not additional loops.
-loop = FactorRDLoop(FACTOR_PROP_SETTING)
-asyncio.run(loop.run(loop_n=10))
+    print("=" * 60)
+    print("RD-Agent fin_factor — autonomous alpha factor discovery")
+    print(f"Model : {os.environ.get('CHAT_MODEL', 'not set')}")
+    print(f"Config: {FACTOR_PROP_SETTING}")
+    print("=" * 60)
+
+    # To resume a previous session, replace FactorRDLoop(FACTOR_PROP_SETTING) with:
+    #   loop = FactorRDLoop.load("log/<session-dir>", checkout=True)
+    # loop_n counts *total* loops completed in the session, not additional loops.
+    loop = FactorRDLoop(FACTOR_PROP_SETTING)
+    loop_n = int(os.environ.get("RDAGENT_LOOP_N", "10"))
+    asyncio.run(loop.run(loop_n=loop_n))
