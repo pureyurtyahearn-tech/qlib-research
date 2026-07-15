@@ -1,3 +1,62 @@
+# Session Notes — 2026-07-15
+
+## Point-in-time S&P 500 universe + qlib ghost-position fix
+
+### Survivorship bias found and removed
+The universe used all week (`daily_pv.h5`, 505 SP500 names) was **today's constituents
+backfilled to 2010** — a survivor universe. Using SHARADAR/SP500 (Nasdaq Data Link) we
+reconstructed true point-in-time membership: **822 tickers were in the index at some point
+2010–2026**, of which 322 were genuinely missing from our data (236 removed/delisted +
+86 recent additions our stale list never had). Reconstruction validated against 114
+quarterly membership snapshots — **exact, 0 disagreement**.
+
+Subscribed to SHARADAR/SEP and pulled prices for all 822 (incl. 340 names we never had —
+Kodak, PG&E, Celgene, Red Hat, E*Trade…). Cross-validated vs yfinance: median daily-return
+correlation **0.99998**, no systematic bias; the handful of disagreements are **spinoffs
+where Sharadar's `closeadj` is correct and yfinance is wrong**. New qlib store at
+`~/.qlib/qlib_data/us_data_pit` with membership encoded as spans in
+`instruments/sp500pit.txt`.
+
+**Impact:** holding prices and window fixed and varying only the universe, survivorship was
+overstating 12-1 momentum's edge by **+4.02%/yr at K=20 — a 96% overstatement** that flips
+the result from "significant" (backfilled t=2.04) to "not significant" (true PIT t=1.00).
+
+### ⚠️ qlib native ghost-position bug — FIXED
+qlib's stock `TopkDropoutStrategy` **never sells a holding once it leaves the index / delists**
+(the sell loop skips any name that isn't currently tradable, and caps sells at `n_drop`
+from *scored* holdings only). On the PIT store this froze acquired/delisted winners in the
+book forever at their last price: **29,803 ghost position-days fabricating +1.84 (184 pts)
+of net return** over 2016–2021.
+
+Two-part fix:
+- **`pit13_fix_store.py`** — 95 of 329 index exits are same-day delistings (acquisitions:
+  ABMD, AET, AGN, ATVI, BCR…) with no price on the first non-member day, so a normal SELL
+  can't execute. Appends flat liquidation bars (last close, 0% return) through the first
+  non-member day so the exit fills. Not look-ahead (synthetic prints on non-member days,
+  which can't be bought). Idempotent.
+- **`pit_strategy.py` → `PITTopkDropoutStrategy`** — force-sells every holding not in the
+  index today (bypassing the `n_drop` cap) and restricts buys to current members.
+
+**Verified** (`pit14_verify_fixed.py`): ghost position-days **29,803 → 0**, 0 unsellable,
+delisted names still genuinely held then exited on removal.
+
+> **Any native `qrun`/`backtest` on `us_data_pit` MUST use `PITTopkDropoutStrategy`, not
+> stock `TopkDropoutStrategy`** — otherwise it fabricates returns on delisted names. The
+> standalone pandas simulators (`pit9_rerun.py`, `pit11_attribute.py`) already enforce PIT
+> and are unaffected.
+
+### ⚠️ Memory: `kernels=1` is required on this machine
+`qlib.init(..., kernels=1)` is **required**. The default joblib parallel data loader spawns
+Windows worker processes that each duplicate the panel; with ~6 GB free it OOMs and **crashed
+VS Code three times on 2026-07-15**. `kernels=1` = serial in-process load, flat footprint.
+Also: build signals from `sep_panel.h5` directly rather than `D.features` over the whole
+`sp500pit` universe (avoids a 3M-row unstack), and pass explicit `codes=` to the exchange.
+
+Scripts: `pit1`–`pit14`, `pit_strategy.py`. Data (gitignored, regenerable): `us_data_pit`
+store, `git_ignore_folder/sharadar/` (SEP panel + membership matrix).
+
+---
+
 # Session Notes — 2026-07-09
 
 ## 1. NYSE data pipeline (new)

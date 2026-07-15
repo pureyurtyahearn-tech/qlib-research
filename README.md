@@ -15,6 +15,35 @@ RD-Agent autonomously proposes alpha factors, codes them, backtests them with ql
 
 Test period: 2023-01-01 → 2026-06-16. Benchmark: SPY.
 
+> **⚠️ These early IC numbers are survivorship-biased and SPY-benchmarked — read the
+> 2026-07 update below before trusting them.** Later work rebuilt a true point-in-time
+> universe and showed the momentum edge was ~96% overstated by survivorship. See
+> `SESSION_NOTES.md` (2026-07-15) for the full account.
+
+---
+
+## ⚠️ Point-in-time universe & the qlib ghost-position bug (2026-07)
+
+A separate research track (scripts `pit1`–`pit14`) rebuilt a **survivorship-bias-free
+S&P 500 universe** from SHARADAR/SP500 + SEP point-in-time data (store at
+`~/.qlib/qlib_data/us_data_pit`, membership spans in `instruments/sp500pit.txt`). Two
+hard-won requirements if you use it:
+
+- **Native `qrun`/`backtest` on `us_data_pit` MUST use `PITTopkDropoutStrategy`
+  (`pit_strategy.py`), not qlib's stock `TopkDropoutStrategy`.** The stock strategy never
+  sells a holding after it leaves the index/delists, freezing acquired winners in the book
+  forever — measured at **29,803 ghost position-days fabricating +184 pts of return** over
+  2016–2021. The fix force-exits on index removal; it also needs the liquidation bars added
+  by `pit13_fix_store.py` (verified ghost-free by `pit14_verify_fixed.py`).
+- **`qlib.init(..., kernels=1)` is required on a low-RAM machine.** The default parallel
+  loader spawns workers that each duplicate the panel and OOM (~6 GB free crashed VS Code
+  three times). Serial loading has a flat footprint. Build signals from the on-disk panel
+  rather than `D.features` over the whole universe.
+
+Survivorship was overstating 12-1 momentum's edge by **+4.02%/yr at K=20 (96%)** — enough
+to flip it from statistically significant (t=2.04) to not (t=1.00). Full detail in
+`SESSION_NOTES.md`.
+
 ---
 
 ## What this repo fixes
