@@ -38,6 +38,39 @@ from dotenv import load_dotenv
 load_dotenv(".env", override=True)
 
 
+# ── Target market / sandbox selection ──────────────────────────────────────────
+#
+# Single source of truth for which US universe this run targets. Drives BOTH the qlib
+# YAML market patch (Patch 3a below, via TARGET_MARKET) and the RD-Agent factor-coding
+# sandbox (FACTOR_CoSTEER_DATA_FOLDER) off the one variable, so switching universes is
+# one edit here, not a YAML patch edit plus a separate manual .env edit.
+#
+# Problem this fixes: FACTOR_CoSTEER_DATA_FOLDER was a static .env setting, decoupled
+# from the market patch. When market was retargeted to 'nyse' without also repointing
+# .env, CoSTEER kept computing every custom factor against the old SP500-ish sandbox —
+# 0% ticker overlap with the NYSE training universe, so every factor came out NaN for
+# every NYSE row and got Fillna'd to a constant: silently dead, no exception raised.
+# Found by hand 2026-07-17; see preflight_check.py check (e), which asserts >=80%
+# overlap between whatever FACTOR_CoSTEER_DATA_FOLDER resolves to and the target market's
+# instrument list — run it before every job.
+#
+# Must be set (and FACTOR_CoSTEER_DATA_FOLDER overridden) before the first rdagent import
+# below, since pydantic-settings reads the env var once, at that import's module-level
+# FACTOR_COSTEER_SETTINGS = FactorCoSTEERSettings() instantiation.
+TARGET_MARKET = "nyse"   # "nyse" | "sp500pit" | (add an entry to _MARKET_SANDBOX first)
+
+_MARKET_SANDBOX = {
+    "sp500pit": "git_ignore_folder/factor_fundamentals_data",
+    "nyse":     "git_ignore_folder/factor_fundamentals_data_nyse",
+}
+if TARGET_MARKET not in _MARKET_SANDBOX:
+    raise ValueError(f"No sandbox mapping for TARGET_MARKET={TARGET_MARKET!r}. "
+                      f"Build one (see nx_build_nyse_sandbox.py) and add it to _MARKET_SANDBOX.")
+_sandbox_folder = _MARKET_SANDBOX[TARGET_MARKET]
+os.environ["FACTOR_CoSTEER_DATA_FOLDER"] = _sandbox_folder
+os.environ["FACTOR_CoSTEER_DATA_FOLDER_DEBUG"] = _sandbox_folder + "_debug"
+
+
 # ── Patch 0: Relax JSON type validation for Claude responses ──────────────────
 #
 # Problem: RD-Agent validates every LLM JSON response with TypeAdapter(dict[str, str]).
@@ -185,7 +218,7 @@ def _local_workspace_execute(self, qlib_config_name="conf.yaml", run_env={}, *ar
     _cn_to_us = {
         'provider_uri: "~/.qlib/qlib_data/cn_data"': 'provider_uri: "~/.qlib/qlib_data/us_data_pit_full"',
         "region: cn":                    "region: us",
-        "market: &market csi300":        "market: &market sp500pit",
+        "market: &market csi300":        f"market: &market {TARGET_MARKET}",
         "benchmark: &benchmark SH000300": "benchmark: &benchmark SP500EW",
         "start_time: 2008-01-01":        "start_time: 2010-01-01",  # 16 GB RAM tier (was 2015 for 8 GB)
         # Multi-line backtest block MUST be replaced before the single-line
@@ -451,9 +484,10 @@ if __name__ == "__main__":
     print(f"Config: {FACTOR_PROP_SETTING}")
     print("=" * 60)
 
-    # To resume a previous session, replace FactorRDLoop(FACTOR_PROP_SETTING) with:
-    #   loop = FactorRDLoop.load("log/<session-dir>", checkout=True)
-    # loop_n counts *total* loops completed in the session, not additional loops.
-    loop = FactorRDLoop(FACTOR_PROP_SETTING)
+    # Resuming the 2026-07-17 NYSE session (5 loops complete, loop 5 killed mid-coding
+    # before its checkpoint -- loops 0-4 are fully checkpointed incl. feedback, so this
+    # continues from loop 4's SOTA rather than starting fresh). loop_n counts *total*
+    # loops completed in the session, not additional loops: 10 = 5 already done + 5 more.
+    loop = FactorRDLoop.load("log/2026-07-17_13-39-26-006865", checkout=True)
     loop_n = int(os.environ.get("RDAGENT_LOOP_N", "10"))
     asyncio.run(loop.run(loop_n=loop_n))
