@@ -26,6 +26,7 @@ STORE = Path.home() / ".qlib" / "qlib_data" / "us_data_pit_full"
 SH = Path("git_ignore_folder/sharadar")
 SOTA_WORKSPACE = "c3955146822249b6b195e5c4e084de5a"   # loop 24
 N_TOP = 50
+MIN_PRICE = 5.0   # names below this are excluded from BUY/SELL, forced to HOLD
 
 # True Alpha158 internal generation order for our 20 base features (verified against
 # Alpha158.get_feature_config(), NOT the col_list order in run_rdagent.py's YAML patch).
@@ -157,24 +158,37 @@ def main():
     ranked = feat.sort_values("predicted_score", ascending=False).reset_index()
     ranked["rank"] = np.arange(1, len(ranked) + 1)
     n = len(ranked)
+
+    # $5 price floor: names below it are ineligible for BUY/SELL regardless of model
+    # score -- reclassified HOLD. Tiering (top/bottom N_TOP) is computed only among
+    # eligible names, so a sub-$5 name at the top of the ranking doesn't bump an
+    # otherwise-qualifying eligible name out of the BUY/SELL lists.
+    eligible = ranked["current_price"] >= MIN_PRICE
+    n_filtered = int((~eligible).sum())
+    elig_idx = ranked.index[eligible]
+
     ranked["signal"] = "HOLD"
-    ranked.loc[ranked["rank"] <= N_TOP, "signal"] = "BUY"
-    ranked.loc[ranked["rank"] > n - N_TOP, "signal"] = "SELL"
+    ranked.loc[elig_idx[:N_TOP], "signal"] = "BUY"
+    ranked.loc[elig_idx[-N_TOP:], "signal"] = "SELL"
 
     out = ranked[["ticker", "rank", "predicted_score", "current_price", "signal"]]
     date_str = latest_date.strftime("%Y%m%d")
     out_path = f"nyse_signal_{date_str}.csv"
     out.to_csv(out_path, index=False)
 
+    buy_out = out[out.signal == "BUY"].sort_values("predicted_score", ascending=False)
+    sell_out = out[out.signal == "SELL"].sort_values("predicted_score", ascending=True)
+
     print(f"\n{'='*60}")
     print(f"NYSE DAILY SIGNAL -- {latest_date.date()}")
     print(f"{'='*60}")
-    print(f"names scored: {n}   BUY: {(out.signal=='BUY').sum()}   "
-          f"SELL: {(out.signal=='SELL').sum()}   HOLD: {(out.signal=='HOLD').sum()}")
+    print(f"names scored: {n}   BUY: {len(buy_out)}   "
+          f"SELL: {len(sell_out)}   HOLD: {(out.signal=='HOLD').sum()}")
+    print(f"filtered out by ${MIN_PRICE:.0f} price floor (forced HOLD): {n_filtered}")
     print(f"\nTop 10 BUY:")
-    print(out.head(10).to_string(index=False))
+    print(buy_out.head(10).to_string(index=False))
     print(f"\nTop 10 SELL (most bearish):")
-    print(out.tail(10).sort_values("rank", ascending=False).to_string(index=False))
+    print(sell_out.head(10).to_string(index=False))
     print(f"\nsaved {out_path}")
 
 
