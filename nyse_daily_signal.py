@@ -26,7 +26,8 @@ STORE = Path.home() / ".qlib" / "qlib_data" / "us_data_pit_full"
 SH = Path("git_ignore_folder/sharadar")
 SOTA_WORKSPACE = "c3955146822249b6b195e5c4e084de5a"   # loop 24
 N_TOP = 50
-MIN_PRICE = 5.0   # names below this are excluded from BUY/SELL, forced to HOLD
+MIN_PRICE = 5.0   # BUY-eligibility floor -- names below this are never tagged BUY
+LONG_ONLY = True  # when True, suppress SELL signals entirely (BUY and HOLD only)
 
 # True Alpha158 internal generation order for our 20 base features (verified against
 # Alpha158.get_feature_config(), NOT the col_list order in run_rdagent.py's YAML patch).
@@ -159,17 +160,21 @@ def main():
     ranked["rank"] = np.arange(1, len(ranked) + 1)
     n = len(ranked)
 
-    # $5 price floor: names below it are ineligible for BUY/SELL regardless of model
-    # score -- reclassified HOLD. Tiering (top/bottom N_TOP) is computed only among
-    # eligible names, so a sub-$5 name at the top of the ranking doesn't bump an
-    # otherwise-qualifying eligible name out of the BUY/SELL lists.
-    eligible = ranked["current_price"] >= MIN_PRICE
-    n_filtered = int((~eligible).sum())
-    elig_idx = ranked.index[eligible]
+    # $5 price floor applies to BUY eligibility only: names below it are never tagged
+    # BUY (reclassified HOLD), regardless of model score. BUY tiering (top N_TOP) is
+    # computed only among eligible names, so a sub-$5 name at the top of the ranking
+    # doesn't bump an otherwise-qualifying eligible name out of the BUY list. SELL
+    # tiering (bottom N_TOP by rank) is unaffected by the floor -- moot while
+    # LONG_ONLY suppresses SELL entirely, but kept correct in case LONG_ONLY is
+    # later set False.
+    eligible_buy = ranked["current_price"] >= MIN_PRICE
+    n_filtered = int((~eligible_buy).sum())
+    elig_idx = ranked.index[eligible_buy]
 
     ranked["signal"] = "HOLD"
     ranked.loc[elig_idx[:N_TOP], "signal"] = "BUY"
-    ranked.loc[elig_idx[-N_TOP:], "signal"] = "SELL"
+    if not LONG_ONLY:
+        ranked.loc[ranked.index[-N_TOP:], "signal"] = "SELL"
 
     out = ranked[["ticker", "rank", "predicted_score", "current_price", "signal"]]
     date_str = latest_date.strftime("%Y%m%d")
@@ -182,13 +187,18 @@ def main():
     print(f"\n{'='*60}")
     print(f"NYSE DAILY SIGNAL -- {latest_date.date()}")
     print(f"{'='*60}")
+    if LONG_ONLY:
+        print("mode: LONG-ONLY -- SELL signals suppressed (all non-BUY names are HOLD)")
     print(f"names scored: {n}   BUY: {len(buy_out)}   "
           f"SELL: {len(sell_out)}   HOLD: {(out.signal=='HOLD').sum()}")
-    print(f"filtered out by ${MIN_PRICE:.0f} price floor (forced HOLD): {n_filtered}")
+    print(f"filtered out of BUY by ${MIN_PRICE:.0f} price floor (forced HOLD): {n_filtered}")
     print(f"\nTop 10 BUY:")
     print(buy_out.head(10).to_string(index=False))
-    print(f"\nTop 10 SELL (most bearish):")
-    print(sell_out.head(10).to_string(index=False))
+    if LONG_ONLY:
+        print(f"\n(SELL list suppressed -- LONG_ONLY=True)")
+    else:
+        print(f"\nTop 10 SELL (most bearish):")
+        print(sell_out.head(10).to_string(index=False))
     print(f"\nsaved {out_path}")
 
 
