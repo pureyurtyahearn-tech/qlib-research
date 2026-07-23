@@ -28,6 +28,7 @@ SOTA_WORKSPACE = "c3955146822249b6b195e5c4e084de5a"   # loop 24
 N_TOP = 50
 MIN_PRICE = 5.0   # BUY-eligibility floor -- names below this are never tagged BUY
 LONG_ONLY = True  # when True, suppress SELL signals entirely (BUY and HOLD only)
+VIX_THRESHOLD = 25.0  # regime filter: VIX >= this suppresses all BUY signals for the day
 
 # True Alpha158 internal generation order for our 20 base features (verified against
 # Alpha158.get_feature_config(), NOT the col_list order in run_rdagent.py's YAML patch).
@@ -56,6 +57,13 @@ ALPHA158_EXPR = {
     'CORR20': 'Corr($close, Log($volume+1), 20)',
     'KLOW': '(Less($open, $close)-$low)/$open',
 }
+
+
+def get_current_vix():
+    """Single check before the model runs: latest VIX close via yfinance."""
+    import yfinance as yf
+    vix = yf.download("^VIX", period="5d", progress=False, auto_adjust=False)
+    return float(vix["Close"].iloc[-1].iloc[0])
 
 
 def check_and_load_model():
@@ -89,6 +97,12 @@ def check_and_load_model():
 
 
 def main():
+    current_vix = get_current_vix()
+    regime_filter_active = current_vix >= VIX_THRESHOLD
+    print(f"VIX check: {current_vix:.2f} (threshold {VIX_THRESHOLD:.0f})")
+    if regime_filter_active:
+        print("REGIME FILTER ACTIVE — VIX above 25, no new longs today.")
+
     model = check_and_load_model()
 
     custom = pd.read_parquet(f"git_ignore_folder/RD-Agent_workspace/{SOTA_WORKSPACE}/combined_factors_df.parquet")
@@ -172,9 +186,10 @@ def main():
     elig_idx = ranked.index[eligible_buy]
 
     ranked["signal"] = "HOLD"
-    ranked.loc[elig_idx[:N_TOP], "signal"] = "BUY"
-    if not LONG_ONLY:
-        ranked.loc[ranked.index[-N_TOP:], "signal"] = "SELL"
+    if not regime_filter_active:
+        ranked.loc[elig_idx[:N_TOP], "signal"] = "BUY"
+        if not LONG_ONLY:
+            ranked.loc[ranked.index[-N_TOP:], "signal"] = "SELL"
 
     out = ranked[["ticker", "rank", "predicted_score", "current_price", "signal"]]
     date_str = latest_date.strftime("%Y%m%d")
@@ -189,6 +204,8 @@ def main():
     print(f"{'='*60}")
     if LONG_ONLY:
         print("mode: LONG-ONLY -- SELL signals suppressed (all non-BUY names are HOLD)")
+    if regime_filter_active:
+        print(f"REGIME FILTER ACTIVE -- VIX {current_vix:.2f} >= {VIX_THRESHOLD:.0f}, all BUY signals suppressed today")
     print(f"names scored: {n}   BUY: {len(buy_out)}   "
           f"SELL: {len(sell_out)}   HOLD: {(out.signal=='HOLD').sum()}")
     print(f"filtered out of BUY by ${MIN_PRICE:.0f} price floor (forced HOLD): {n_filtered}")
