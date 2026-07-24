@@ -30,6 +30,20 @@ MIN_PRICE = 5.0   # BUY-eligibility floor -- names below this are never tagged B
 LONG_ONLY = True  # when True, suppress SELL signals entirely (BUY and HOLD only)
 VIX_THRESHOLD = 25.0  # regime filter: VIX >= this suppresses all BUY signals for the day
 
+# Sector filter, BUY-eligibility only (same treatment as MIN_PRICE). Per the Alphalens
+# tearsheet (nyse_alphalens_analysis.py, 2010-2026): these three sectors show no usable
+# signal in the quantile-return breakdown --
+#   Energy: actively INVERTED -- Q5 (highest predicted score) is the most NEGATIVE
+#     quantile across all three horizons (1D/5D/10D), the opposite of what the factor
+#     is supposed to predict.
+#   Communication Services: negative mean return across every quantile (1 through 5) --
+#     no separation, and no quantile is actually profitable.
+#   Consumer Defensive: no monotonic rank ordering between quantiles -- the factor
+#     carries no information here.
+# Industrials, Technology, Financial Services, and Consumer Cyclical showed clean
+# monotonic Q1->Q5 separation and are retained. Sectors from Sharadar TICKERS.sector.
+SECTOR_EXCLUDE = {"Energy", "Communication Services", "Consumer Defensive"}
+
 # True Alpha158 internal generation order for our 20 base features (verified against
 # Alpha158.get_feature_config(), NOT the col_list order in run_rdagent.py's YAML patch).
 ALPHA158_ORDER = ['KLEN', 'KLOW', 'ROC60', 'STD5', 'RSQR5', 'RSQR10', 'RSQR20', 'RSQR60',
@@ -174,15 +188,24 @@ def main():
     ranked["rank"] = np.arange(1, len(ranked) + 1)
     n = len(ranked)
 
-    # $5 price floor applies to BUY eligibility only: names below it are never tagged
-    # BUY (reclassified HOLD), regardless of model score. BUY tiering (top N_TOP) is
-    # computed only among eligible names, so a sub-$5 name at the top of the ranking
-    # doesn't bump an otherwise-qualifying eligible name out of the BUY list. SELL
-    # tiering (bottom N_TOP by rank) is unaffected by the floor -- moot while
-    # LONG_ONLY suppresses SELL entirely, but kept correct in case LONG_ONLY is
-    # later set False.
-    eligible_buy = ranked["current_price"] >= MIN_PRICE
-    n_filtered = int((~eligible_buy).sum())
+    # Sector lookup -- same source/method as the earlier BUY-list sector-concentration
+    # check: Sharadar TICKERS.sector, deduplicated to one row per ticker.
+    tickers_tbl = pd.read_csv(SH / "tickers.csv", low_memory=False)
+    sector_map = tickers_tbl.drop_duplicates("ticker").set_index("ticker")["sector"]
+    ranked["sector"] = ranked["ticker"].map(sector_map)
+
+    # $5 price floor and sector exclusion both apply to BUY eligibility only: names
+    # failing either are never tagged BUY (reclassified HOLD), regardless of model
+    # score. BUY tiering (top N_TOP) is computed only among eligible names, so an
+    # ineligible name at the top of the ranking doesn't bump an otherwise-qualifying
+    # eligible name out of the BUY list. SELL tiering (bottom N_TOP by rank) is
+    # unaffected by either filter -- moot while LONG_ONLY suppresses SELL entirely,
+    # but kept correct in case LONG_ONLY is later set False.
+    eligible_price = ranked["current_price"] >= MIN_PRICE
+    eligible_sector = ~ranked["sector"].isin(SECTOR_EXCLUDE)
+    eligible_buy = eligible_price & eligible_sector
+    n_filtered_price = int((~eligible_price).sum())
+    n_filtered_sector = int((eligible_price & ~eligible_sector).sum())
     elig_idx = ranked.index[eligible_buy]
 
     ranked["signal"] = "HOLD"
@@ -191,7 +214,7 @@ def main():
         if not LONG_ONLY:
             ranked.loc[ranked.index[-N_TOP:], "signal"] = "SELL"
 
-    out = ranked[["ticker", "rank", "predicted_score", "current_price", "signal"]]
+    out = ranked[["ticker", "rank", "predicted_score", "current_price", "sector", "signal"]]
     date_str = latest_date.strftime("%Y%m%d")
     out_path = f"nyse_signal_{date_str}.csv"
     out.to_csv(out_path, index=False)
@@ -208,7 +231,8 @@ def main():
         print(f"REGIME FILTER ACTIVE -- VIX {current_vix:.2f} >= {VIX_THRESHOLD:.0f}, all BUY signals suppressed today")
     print(f"names scored: {n}   BUY: {len(buy_out)}   "
           f"SELL: {len(sell_out)}   HOLD: {(out.signal=='HOLD').sum()}")
-    print(f"filtered out of BUY by ${MIN_PRICE:.0f} price floor (forced HOLD): {n_filtered}")
+    print(f"filtered out of BUY by ${MIN_PRICE:.0f} price floor (forced HOLD): {n_filtered_price}")
+    print(f"filtered out of BUY by excluded sector {sorted(SECTOR_EXCLUDE)} (forced HOLD): {n_filtered_sector}")
     print(f"\nTop 10 BUY:")
     print(buy_out.head(10).to_string(index=False))
     if LONG_ONLY:
