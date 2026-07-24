@@ -22,6 +22,7 @@ panel pulled from the qlib store. That's the standard, correct way to use this A
 (passing precomputed returns instead of prices is not what it expects).
 """
 import warnings; warnings.filterwarnings("ignore")
+import os
 import pickle
 from pathlib import Path
 import numpy as np, pandas as pd
@@ -31,14 +32,24 @@ import matplotlib.pyplot as plt
 
 from alphalens.utils import get_clean_factor_and_forward_returns
 from alphalens.tears import create_full_tear_sheet
+from alphalens import performance as perf
 
 STORE = Path.home() / ".qlib" / "qlib_data" / "us_data_pit_full"
 SH = Path("git_ignore_folder/sharadar")
 SOTA_WORKSPACE = "c3955146822249b6b195e5c4e084de5a"   # loop 24
-OUT_DIR = Path("git_ignore_folder/alphalens_output")
 START = "2010-01-01"
 PERIODS = (1, 5, 10)
 QUANTILES = 5
+
+# Optional sector exclusion + separate output dir, both env-var-overridable so the
+# default (plain `python nyse_alphalens_analysis.py`) reproduces the original committed
+# unfiltered baseline exactly. Set ALPHALENS_SECTOR_EXCLUDE to a comma-separated list
+# (e.g. matching nyse_daily_signal.py's SECTOR_EXCLUDE: "Energy,Communication
+# Services,Consumer Defensive") to remove those sectors from the analysis universe
+# entirely -- not just BUY eligibility as in the daily signal script, but out of the
+# Alphalens factor/price/groupby data altogether, for a clean side-by-side comparison.
+OUT_DIR = Path(os.environ.get("ALPHALENS_OUT_DIR", "git_ignore_folder/alphalens_output"))
+SECTOR_EXCLUDE = {s.strip() for s in os.environ.get("ALPHALENS_SECTOR_EXCLUDE", "").split(",") if s.strip()}
 
 # Alpha158's 20 base features, exact expressions -- copied verbatim from
 # nx_wf_walkforward.py (same set used to train/validate loop 24's model).
@@ -100,6 +111,19 @@ def main():
                                 as_list=True)
     print(f"NYSE instruments, {START} -> {last_factor_date.date()}: {len(codes)}")
 
+    # Sector lookup, from Sharadar TICKERS (same source/method as nyse_daily_signal.py
+    # and the earlier BUY-list sector-breakdown check).
+    tickers = pd.read_csv(SH / "tickers.csv", low_memory=False)
+    sector_series = tickers.drop_duplicates("ticker").set_index("ticker")["sector"]
+
+    if SECTOR_EXCLUDE:
+        ticker_sector = sector_series.reindex(codes)
+        excluded_mask = ticker_sector.isin(SECTOR_EXCLUDE)
+        n_excluded = int(excluded_mask.sum())
+        codes = [c for c, excl in zip(codes, excluded_mask) if not excl]
+        print(f"SECTOR FILTER ACTIVE -- excluding {sorted(SECTOR_EXCLUDE)}: "
+              f"removed {n_excluded} instruments from the analysis universe, {len(codes)} remain")
+
     # ---- Alpha158 base features over the same window ----
     names20 = list(ALPHA158_EXPR)
     alpha = D.features(codes, list(ALPHA158_EXPR.values()),
@@ -136,10 +160,7 @@ def main():
     prices = px.reset_index().pivot(index="datetime", columns="instrument", values="close")
     print(f"price panel: {prices.shape}")
 
-    # ---- sector groupby, from Sharadar TICKERS (same source/method as the earlier
-    # BUY-list sector-breakdown task) ----
-    tickers = pd.read_csv(SH / "tickers.csv", low_memory=False)
-    sector_series = tickers.drop_duplicates("ticker").set_index("ticker")["sector"]
+    # ---- sector groupby (sector_series loaded earlier, alongside the universe filter) ----
     inst_set = sorted(factor.index.get_level_values("instrument").unique())
     sector_map = sector_series.reindex(inst_set).dropna().to_dict()
     print(f"sector mapping: {len(sector_map)}/{len(inst_set)} instruments matched to a "
@@ -152,6 +173,13 @@ def main():
         max_loss=0.5,
     )
     print(f"clean factor_data: {factor_data.shape}")
+
+    # Full per-quantile mean return table (bps, all 5 quantiles) -- the printed
+    # Returns Analysis summary only shows the top/bottom quantile extremes, not the
+    # middle quantiles, and this is otherwise only visible in the saved plot.
+    mean_quant_ret, _ = perf.mean_return_by_quantile(factor_data, by_group=False, demeaned=True)
+    print("\nMean return by quantile (bps):")
+    print((mean_quant_ret * 1e4).round(3).to_string())
 
     # alphalens' GridFigure explicitly plt.close()s each section's figure once it's
     # done with it (built for inline Jupyter display, not headless scripts) -- by the
